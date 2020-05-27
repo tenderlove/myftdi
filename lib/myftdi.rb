@@ -1,5 +1,5 @@
-require "libusb"
 require "logger"
+require "myftdi/usb"
 
 class FTDI
   module BitModes
@@ -140,13 +140,16 @@ class FTDI
   LATENCY_MAX = 255
   LATENCY_EEPROM_FT232R = 77
 
+  def self.ft232h_device
+    MyFTDI::USB.ft232h
+  end
+
   def self.ft232h_spi
-    usb = LIBUSB::Context.new
-    device = usb.devices(idVendor: 0x0403, idProduct: 0x6014).first || raise
+    device = ft232h_device
     spi = SPIController.new nil, 1, true
     direction = spi.spi_dir | spi.gpio_dir
     initial = spi.cs_bits
-    ftdi = new(usb, device)
+    ftdi = new(device)
     configure_mpsse(ftdi, frequency: 6e6, initial: initial, direction: direction, latency: 16)
     spi.ftdi = ftdi
     spi
@@ -222,7 +225,7 @@ class FTDI
       SPIPort.new self, cs, frequency, hold, mode
     end
 
-    def exchange frequency, out, readlen, cs_prolog, cs_epilog, cpol, cpha, duplex, droptail
+    def exchange out, readlen, cs_prolog, cs_epilog, cpol, cpha, duplex, droptail
       if duplex
         raise NotImplementedError, "duplex not implemented yet"
       end
@@ -231,20 +234,16 @@ class FTDI
         raise NotImplementedError, "what is this?"
       end
 
-      if frequency != self.frequency
-        raise NotImplementedError, "frequencies don't match %d %d" % [frequency, self.frequency]
-      end
-
       logger.debug [frequency, out, readlen, cs_prolog.pack('C*'), cs_epilog.pack('C*'), cpol, cpha, duplex, droptail].inspect
 
       if duplex
       else
-        exchange_half_duplex(frequency, out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail)
+        exchange_half_duplex(out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail)
       end
       #cmd = cs_prolog.flat_map { |byte|
     end
 
-    def exchange_half_duplex frequency, out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail
+    def exchange_half_duplex out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail
       direction = self.direction & 0xFF
       cmd = ''.b
       cs_prolog.each do |ctrl|
@@ -324,8 +323,7 @@ class FTDI
 
   attr_reader :logger, :frequency
 
-  def initialize ctx, dev
-    @ctx                   = ctx
+  def initialize dev
     @usb_dev               = dev
     @logger                = Logger.new $stderr
     @usb_read_timeout      = 5000
@@ -352,14 +350,6 @@ class FTDI
     @tracer                = nil
     purge_buffers
     reset_device
-  end
-
-  def divcalc speed, frequency
-    divisor = ((speed + frequency / 2) / frequency).to_i - 1
-    divisor = [0, [0xFFFF, divisor].min].max
-    actual_freq = speed / (divisor + 1)
-    error = (actual_freq / frequency) - 1
-    [divisor, actual_freq, error]
   end
 
   def set_frequency frequency
@@ -420,15 +410,13 @@ class FTDI
     size       = cmd.bytesize
     write_size = writebuffer_chunksize
 
-    ep = @usb_dev.endpoints.last
-
-    @usb_dev.open_interface(0) do |handle|
+    @usb_dev.bulk_transfer do |handle|
       while offset < size
         bytes = cmd.byteslice(offset, write_size)
         logger.debug "> #{bytes.inspect} "
 
         # FIXME: add timeout
-        length = handle.bulk_transfer(endpoint: ep, dataOut: cmd.byteslice(offset, write_size))
+        length = handle.call(cmd.byteslice(offset, write_size))
         offset += length
       end
     end
@@ -506,9 +494,7 @@ class FTDI
   end
 
   def read
-    @usb_dev.open_interface(0) do |handle|
-      handle.bulk_transfer(endpoint: @usb_dev.endpoints.first, dataIn: readbuffer_chunksize)
-    end
+    @usb_dev.read readbuffer_chunksize
   end
 
   def max_packet_size
@@ -523,22 +509,29 @@ class FTDI
   end
 
   def reset_device
-    cmd = SIO_REQ_RESET
-    value = SIO_RESET_SIO
-    write_cmd cmd, value
+    reset SIO_RESET_SIO
   end
 
   def purge_rx_buffer
-    cmd = SIO_REQ_RESET
-    value = SIO_RESET_PURGE_RX
-    write_cmd cmd, value
+    reset SIO_RESET_PURGE_RX
   end
 
   def purge_tx_buffer
-    cmd = SIO_REQ_RESET
-    value = SIO_RESET_PURGE_TX
-    write_cmd cmd, value
+    reset SIO_RESET_PURGE_TX
   end
+
+  def reset value
+    write_cmd SIO_REQ_RESET, value
+  end
+
+  def divcalc speed, frequency
+    divisor = ((speed + frequency / 2) / frequency).to_i - 1
+    divisor = [0, [0xFFFF, divisor].min].max
+    actual_freq = speed / (divisor + 1)
+    error = (actual_freq / frequency) - 1
+    [divisor, actual_freq, error]
+  end
+  private :divcalc
 
   class SPIPort
     include SPI
@@ -560,7 +553,7 @@ class FTDI
     end
 
     def write bytes
-      @controller.exchange frequency, bytes, 0, @cs_prolog, @cs_epilog, @cpol, @cpha, false, 0
+      @controller.exchange bytes, 0, @cs_prolog, @cs_epilog, @cpol, @cpha, false, 0
     end
 
     private
@@ -587,9 +580,7 @@ class FTDI
       LIBUSB::RECIPIENT_DEVICE |
       LIBUSB::ENDPOINT_OUT
 
-    @usb_dev.open_interface(0) do |handle|
-      handle.control_transfer(bmRequestType: req_type, bRequest: cmd, wValue: value, wIndex: 0x0000, timeout: 0, dataOut: ''.b)
-    end
+    @usb_dev.write_cmd req_type, cmd, value
   end
 
   def endpoint
@@ -597,25 +588,35 @@ class FTDI
   end
 end
 
-dev = FTDI.ft232h_spi
+if $0 == __FILE__
+  dev = FTDI.ft232h_spi
 
-port = dev.get_port 0, 0
+  port = dev.get_port 0, 0
 
-# Synchronous exchange with the remote SPI port
-write_buf = "\x0C\x01\x09\xFF\x0A\x0F\x0B\x07\x0F\x01".b
-port.write(write_buf)
-sleep(1)
-write_buf = "\x0F\x00".b
-port.write(write_buf)
-write_buf = "\x01\x0F\x02\x0F\x03\x0F\x04\x0F\x05\x0F\x06\x0F\x07\x0F\x08\x0F".b
-port.write(write_buf)
+  # Synchronous exchange with the remote SPI port
+  port.write "\x0C\x01".b
+  port.write "\x09\xFF".b
+  port.write "\x0A\x0F".b
+  port.write "\x0B\x07".b
+  port.write "\x0F\x01".b
+  sleep(1)
+  port.write "\x0F\x00".b
+  port.write "\x01\x0F".b
+  port.write "\x02\x0F".b
+  port.write "\x03\x0F".b
+  port.write "\x04\x0F".b
+  port.write "\x05\x0F".b
+  port.write "\x06\x0F".b
+  port.write "\x07\x0F".b
+  port.write "\x08\x0F".b
 
-def set_digits(dev, num)
-  buf = ''.b
-  8.times do |x|
-    dig = num % 10
-    dev.write([x + 1, dig].pack("CC"))
-    num = num / 10
+  def set_digits(dev, num)
+    buf = ''.b
+    8.times do |x|
+      dig = num % 10
+      dev.write([x + 1, dig].pack("CC"))
+      num = num / 10
+    end
   end
+  set_digits(port, 22121)
 end
-set_digits(port, 22121)
