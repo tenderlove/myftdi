@@ -1,4 +1,5 @@
 require "logger"
+require "forwardable"
 require "myftdi/usb"
 
 class FTDI
@@ -146,13 +147,15 @@ class FTDI
 
   def self.ft232h_spi
     device = ft232h_device
-    spi = SPIController.new nil, 1, true
-    direction = spi.spi_dir | spi.gpio_dir
-    initial = spi.cs_bits
+
+    config = SPIController::Config.new 1, true
+    direction = config.direction
+    initial = config.cs_bits
+
     ftdi = new(device)
     configure_mpsse(ftdi, frequency: 6e6, initial: initial, direction: direction, latency: 16)
-    spi.ftdi = ftdi
-    spi
+
+    SPIController.new ftdi, config
   end
 
   def self.configure_mpsse ftdi, frequency:, initial:, direction:, latency:
@@ -193,36 +196,67 @@ class FTDI
 
   class SPIController
     include SPI
+    extend Forwardable
 
-    attr_reader :spi_dir, :gpio_dir, :cs_bits, :gpio_mask, :spi_mask, :gpio_low, :turbo, :clock_phase
-    attr_accessor :ftdi
+    class Config
+      include SPI
 
-    def initialize ftdi, cs_count, turbo
-      @ftdi        = ftdi
-      @gpio_port   = nil
-      @gpio_dir    = 0
-      @gpio_mask   = 0
-      @gpio_low    = 0
-      @wide_port   = false
-      @cs_count    = cs_count
-      @turbo       = turbo
-      @clock_phase = false
-      @cs_bits     = 0
-      @spi_ports   = []
-      @spi_dir     = 0
-      @spi_mask    = SPI_BITS
-      configure
+      attr_reader :spi_dir, :gpio_dir, :cs_bits, :gpio_mask, :spi_mask
+      attr_reader :gpio_low, :turbo, :clock_phase
+
+      def initialize cs_count, turbo
+        @gpio_dir    = 0
+        @gpio_mask   = 0
+        @gpio_low    = 0
+        @cs_count    = cs_count
+        @turbo       = turbo
+        @clock_phase = false
+        @cs_bits     = 0
+        @spi_dir     = 0
+        @spi_mask    = SPI_BITS
+        configure
+      end
+
+      def direction
+        spi_dir | gpio_dir
+      end
+
+      private
+
+      def configure
+        @cs_bits = ((CS_BIT << @cs_count) - 1) & ~(CS_BIT - 1)
+        @spi_dir = @cs_bits | DO_BIT | SCK_BIT
+        @spi_mask = @cs_bits | SPI_BITS
+        set_gpio_direction(16, (~@spi_mask) & 0xFFFF, 0)
+      end
+
+      def set_gpio_direction width, pins, direction
+        gpio_mask = ((1 << width) - 1) & ~@spi_mask
+
+        if pins & gpio_mask != pins
+          raise "No such GPIO pins"
+        end
+
+        @gpio_dir &= ~pins
+        @gpio_dir |= (pins & direction)
+        @gpio_mask = gpio_mask & pins
+      end
     end
 
-    def frequency
-      @ftdi.frequency
+    attr_reader :ftdi
+
+    def_delegators :@config, :spi_dir, :gpio_dir, :cs_bits, :spi_mask, :gpio_low
+    def_delegators :@config, :turbo, :clock_phase, :direction
+    def_delegators :@ftdi, :frequency, :logger
+
+    def initialize ftdi, config
+      @ftdi        = ftdi
+      @config      = config
     end
 
     def get_port cs, mode
       hold = 1 + (1e6 / frequency).to_i
-      puts frequency
-      puts hold
-      SPIPort.new self, cs, frequency, hold, mode
+      SPIPort.new self, cs, hold, mode
     end
 
     def exchange out, readlen, cs_prolog, cs_epilog, cpol, cpha, duplex, droptail
@@ -240,7 +274,6 @@ class FTDI
       else
         exchange_half_duplex(out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail)
       end
-      #cmd = cs_prolog.flat_map { |byte|
     end
 
     def exchange_half_duplex out, readlen, cs_prolog, cs_epilog, cpol, cpha, droptail
@@ -289,35 +322,6 @@ class FTDI
           raise NotImplementedError, "don't know how to non-turbo write yet"
         end
       end
-    end
-
-    def direction
-      spi_dir | gpio_dir
-    end
-
-    private
-
-    def logger
-      ftdi.logger
-    end
-
-    def configure
-      @cs_bits = ((CS_BIT << @cs_count) - 1) & ~(CS_BIT - 1)
-      @spi_dir = @cs_bits | DO_BIT | SCK_BIT
-      @spi_mask = @cs_bits | SPI_BITS
-      set_gpio_direction(16, (~@spi_mask) & 0xFFFF, 0)
-    end
-
-    def set_gpio_direction width, pins, direction
-      gpio_mask = ((1 << width) - 1) & ~@spi_mask
-
-      if pins & gpio_mask != pins
-        raise "No such GPIO pins"
-      end
-
-      @gpio_dir &= ~pins
-      @gpio_dir |= (pins & direction)
-      @gpio_mask = gpio_mask & pins
     end
   end
 
@@ -540,7 +544,7 @@ class FTDI
 
     attr_reader :controller, :cs_hold, :mode
 
-    def initialize controller, cs, frequency, cs_hold, mode
+    def initialize controller, cs, cs_hold, mode
       @controller = controller
       @cs         = cs
       @cs_hold    = cs_hold
