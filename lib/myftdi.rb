@@ -528,15 +528,6 @@ class FTDI
     write_cmd SIO_REQ_RESET, value
   end
 
-  def divcalc speed, frequency
-    divisor = ((speed + frequency / 2) / frequency).to_i - 1
-    divisor = [0, [0xFFFF, divisor].min].max
-    actual_freq = speed / (divisor + 1)
-    error = (actual_freq / frequency) - 1
-    [divisor, actual_freq, error]
-  end
-  private :divcalc
-
   class SPIPort
     include SPI
 
@@ -568,8 +559,6 @@ class FTDI
       @cpol       = !(mode & 0x2).zero?
       @cpha       = !(mode & 0x1).zero?
 
-      cs_hold = 1
-
       cs_clock = 0xFF & ~(((@cpol ? 0 : 1) & SCK_BIT) | DO_BIT)
       cs_select = 0xFF & ~((CS_BIT << @cs) | ((@cpol ? 0 : 1) & SCK_BIT) | DO_BIT)
       @cs_prolog = [cs_clock, cs_select]
@@ -578,6 +567,14 @@ class FTDI
   end
 
   private
+
+  def divcalc speed, frequency
+    divisor = ((speed + frequency / 2) / frequency).to_i - 1
+    divisor = [0, [0xFFFF, divisor].min].max
+    actual_freq = speed / (divisor + 1)
+    error = (actual_freq / frequency) - 1
+    [divisor, actual_freq, error]
+  end
 
   def write_cmd cmd, value
     req_type = LIBUSB::REQUEST_TYPE_VENDOR |
@@ -597,30 +594,52 @@ if $0 == __FILE__
 
   port = dev.get_port 0, 0
 
+  def clear_display port
+    8.times { |i| port.write [i + 1, 0xF].pack("CC") }
+  end
+
   # Synchronous exchange with the remote SPI port
-  port.write "\x0C\x01".b
-  port.write "\x09\xFF".b
-  port.write "\x0A\x0F".b
-  port.write "\x0B\x07".b
-  port.write "\x0F\x01".b
-  sleep(1)
-  port.write "\x0F\x00".b
-  port.write "\x01\x0F".b
-  port.write "\x02\x0F".b
-  port.write "\x03\x0F".b
-  port.write "\x04\x0F".b
-  port.write "\x05\x0F".b
-  port.write "\x06\x0F".b
-  port.write "\x07\x0F".b
-  port.write "\x08\x0F".b
+  #port.write "\x0C\x01".b
+  #port.write "\x09\xFF".b # Decode B all digits
+  #port.write "\x0A\x0F".b # Full intensity
+  #port.write "\x0B\x07".b # Scan all digits
+  #port.write "\x0F\x01".b # Display test
+  #sleep(1)
+  #port.write "\x0F\x00".b # Disable test
+
+  #clear_display port
 
   def set_digits(dev, num)
     buf = ''.b
     8.times do |x|
-      dig = num % 10
-      dev.write([x + 1, dig].pack("CC"))
-      num = num / 10
+      if num == 0
+        dev.write([x + 1, 0xF].pack("CC"))
+      else
+        dig = num % 10
+        dev.write([x + 1, (1 << 7) | dig].pack("CC"))
+        num = num / 10
+      end
     end
   end
-  set_digits(port, 22121)
+
+  def set_date port, date
+    port.write [1, date.day % 10].pack "CC"
+    port.write [2, date.day / 10].pack "CC"
+    port.write [3, (1 << 7) | (date.month % 10)].pack "CC"
+    port.write [4, date.month / 10].pack "CC"
+    port.write [5, (1 << 7) | date.year % 10].pack "CC"
+    port.write [6, (date.year / 10) % 10].pack "CC"
+    port.write [7, (date.year / 100) % 10].pack "CC"
+    port.write [8, (date.year / 1000)].pack "CC"
+  end
+
+  set_date port, Time.now
+  exit
+
+  loop do
+    num = rand(99999999)
+    p num
+    set_digits(port, num)
+    sleep 0.5
+  end
 end
