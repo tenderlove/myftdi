@@ -1,6 +1,6 @@
 require "libusb"
 
-module MyFTDI
+class MyFTDI
   # A wrapper around the USB object so we can more easily swap / stub in test
   class USB # :nodoc:
     def self.ft232h
