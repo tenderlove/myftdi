@@ -22,6 +22,11 @@ class MyFTDI
       end
     end
 
+    def max_packet_size
+      endpoint = @usb_dev.endpoints.first
+      endpoint.wMaxPacketSize
+    end
+
     def bcdDevice; @usb_dev.bcdDevice; end
 
     def write_cmd req_type, cmd, value

@@ -46,6 +46,9 @@ class MyFTDI
   SIO_REQ_SET_BITMODE = 0xb        # Change bit mode
   SIO_REQ_READ_PINS = 0xc          # Read GPIO pin value (or "get bitmode")
 
+  ERROR_BITS = [0x00, 0x8E]
+  TX_EMPTY_BITS = 0x60
+
   # Clocks and baudrates
   BUS_CLOCK_BASE = 6.0E6  # 6 MHz
   BUS_CLOCK_HIGH = 30.0E6  # 30 MHz
@@ -198,6 +201,54 @@ class MyFTDI
     ftdi.validate_mpsse
   end
 
+  class BufferedReader
+    def initialize usb, controller
+      @usb = usb
+      @offset = 0
+      @buffer = ''
+      @controller   = controller
+    end
+
+    def read size
+      packet_size = @controller.max_packet_size
+
+      if size <= @buffer.bytesize - offset
+        data = buffer[offset, size]
+        @offset += size
+        return data
+      end
+
+      tmpbuf = @controller.read
+      length = tmpbuf.bytesize
+      @controller.logger.debug "#{__method__} read_size #{length}"
+      @controller.logger.debug "#{__method__} packet_size #{packet_size}"
+
+      if length > 2
+        chunks = (length + packet_size - 1) / packet_size
+        count = packet_size - 2
+        status = tmpbuf[0, 2].bytes
+        if status[1] & ERROR_BITS[1] != 0
+          raise "oh no!"
+        end
+        return tmpbuf[2..-1]
+      else
+        if length == 2
+          status = tmpbuf[0, 2].bytes
+          if status[1] & ERROR_BITS[1] != 0
+            raise "oh no!"
+          end
+          return ''.b
+        else
+          raise "argh!!"
+        end
+      end
+      tmpbuf
+    end
+
+    private
+    attr_reader :offset
+  end
+
   attr_reader :logger, :frequency
 
   def initialize dev
@@ -226,6 +277,7 @@ class MyFTDI
     @cbus_pins             = [0, 0]
     @cbus_out              = 0
     @tracer                = nil
+    @buffered_reader       = BufferedReader.new @usb_dev, self
     purge_buffers
     reset_device
   end
@@ -301,6 +353,10 @@ class MyFTDI
     if bytes.bytesize >= 2 && bytes[0] == "\xfa"
       raise "Invalid command %d" % bytes[1].ord
     end
+  end
+
+  def buffered_read size
+    @buffered_reader.read size
   end
 
   def read_data size
@@ -387,6 +443,10 @@ class MyFTDI
     end
   end
 
+  def fifo_sizes
+    FIFO_SIZES[version]
+  end
+
   def writebuffer_chunksize
     @writebuffer_chunksize ||= FIFO_SIZES[version].first
   end
@@ -400,7 +460,7 @@ class MyFTDI
   end
 
   def max_packet_size
-    endpoint.wMaxPacketSize
+    @usb_dev.max_packet_size
   end
 
   def set_bitmode bitmask, mode
