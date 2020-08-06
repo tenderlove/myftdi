@@ -212,16 +212,22 @@ class MyFTDI
     def read size
       packet_size = @controller.max_packet_size
 
-      if size <= @buffer.bytesize - offset
-        data = buffer[offset, size]
-        @offset += size
-        return data
-      end
 
       tmpbuf = @controller.read
       length = tmpbuf.bytesize
-      @controller.logger.debug "#{__method__} read_size #{length}"
-      @controller.logger.debug "#{__method__} packet_size #{packet_size}"
+
+      want = size + 2 - length
+
+      while want > 0
+        b = @controller.read
+        length = b.bytesize
+        want -= length
+        tmpbuf += b
+        @controller.logger.debug "#{__method__} read_size #{length}"
+        @controller.logger.debug "#{__method__} packet_size #{packet_size}"
+      end
+
+      length = tmpbuf.bytesize
 
       if length > 2
         chunks = (length + packet_size - 1) / packet_size
@@ -237,12 +243,11 @@ class MyFTDI
           if status[1] & ERROR_BITS[1] != 0
             raise "oh no!"
           end
-          return ''.b
+          return :empty
         else
           raise "argh!!"
         end
       end
-      tmpbuf
     end
 
     private

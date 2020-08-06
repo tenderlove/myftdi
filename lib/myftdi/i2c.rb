@@ -37,6 +37,11 @@ class MyFTDI
         buffer = [from].pack("C")
         @controller.exchange(@address, buffer, length)
       end
+
+      def write_to addr, out
+        buffer = [addr].pack("C") + out
+        @controller.write(@address, buffer)
+      end
     end
 
     class Controller
@@ -132,6 +137,13 @@ class MyFTDI
         [1, (value + bit_delay) / bit_delay].max.to_i
       end
 
+      def write address, out
+        i2caddress = (address << 1) & HIGH
+        do_prolog i2caddress
+        do_write out
+        do_epilog
+      end
+
       def exchange address, out, readlen
         i2caddress = (address << 1) & HIGH
         do_prolog i2caddress
@@ -155,7 +167,12 @@ class MyFTDI
 
       def do_epilog
         @ftdi.write_data stop.pack("C*")
-        ftdi.logger.debug "#{__method__}: #{@ftdi.buffered_read(1).dump}"
+        buf = @ftdi.buffered_read(1)
+        if buf == :empty
+          ftdi.logger.debug "#{__method__}: empty"
+        else
+          ftdi.logger.debug "#{__method__}: #{buf.dump}"
+        end
       end
 
       def do_prolog i2caddress
@@ -193,7 +210,6 @@ class MyFTDI
               cmd = (read_not_last * (rem - 1)) + read_last + immediate
               @ftdi.write_data cmd.pack("C*")
               buf = @ftdi.buffered_read rem
-              rem = 0
               return buf
             end
           end
